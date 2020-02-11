@@ -597,6 +597,7 @@ gptr alloc_root(MEM_ROOT *mem_root, size_t Size);
 void free_root(MEM_ROOT *root, myf MyFLAGS);
 char *strdup_root(MEM_ROOT *root,const char *str);
 char *memdup_root(MEM_ROOT *root,const char *str, size_t len);
+extern void *ma_multi_malloc(myf MyFlags, ...);
 void load_defaults(const char *conf_file, const char **groups,
 		   int *argc, char ***argv);
 void free_defaults(char **argv);

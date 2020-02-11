@@ -54,5 +54,14 @@ struct st_mysql_options_extension {
   int (*verify_local_infile)(void *data, const char *filename);
 };
 
+struct st_mariadb_session_state
+{
+  LIST *list,
+       *current;
+};
+
+struct st_mariadb_extension {
+  struct st_mariadb_session_state session_state[SESSION_TRACK_TYPES];
+};
 
 #endif
