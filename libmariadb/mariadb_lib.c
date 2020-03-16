@@ -1116,6 +1116,60 @@ int mthd_my_read_one_row(MYSQL *mysql,uint fields,MYSQL_ROW row, ulong *lengths)
   return 0;
 }
 
+MYSQL_FIELD *mthd_my_read_metadata_ex(MYSQL *mysql, MA_MEM_ROOT *alloc,
+                                     ulong field_count, uint field)
+{
+  ulong *len;
+  uint  f;
+  uchar *pos;
+  MYSQL_FIELD *fields, *result;
+  MYSQL_ROWS data;
+  NET *net = &mysql->net;
+
+  len= (ulong*) ma_alloc_root(alloc, sizeof(ulong)*field);
+  fields= result= (MYSQL_FIELD *) ma_alloc_root(alloc,
+      sizeof(MYSQL_FIELD)*field_count);
+
+  if (!result)
+  {
+    SET_CLIENT_ERROR(mysql, CR_OUT_OF_MEMORY, SQLSTATE_UNKNOWN, 0);
+    return(0);
+  }
+
+  data.data= (MYSQL_ROW) ma_alloc_root(alloc, sizeof(char *)*(field+1));
+  memset(data.data, 0, sizeof(char *)*(field+1));
+
+  /*
+     In this below loop we read each column info as 1 single row
+     and save it in mysql->fields array
+     */
+  for (f=0 ; f < field_count ; ++f)
+  {
+    if(mthd_my_read_one_row(mysql, field, data.data, len) == -1)
+      return NULL;
+    if(unpack_field(mysql, alloc, 0, &data, fields++))
+      return NULL;
+  }
+  /* Read EOF packet as we don't yet send CLIENT_DEPRECATE_EOF flag */
+  if (packet_error == ma_net_safe_read(mysql))
+    return 0;
+
+  pos= net->read_pos;
+  if (*pos == 254)
+  {
+    mysql->warning_count= uint2korr(pos + 1);
+    mysql->server_status= uint2korr(pos + 3);
+  }
+
+  return result;
+}
+
+MYSQL_FIELD *mthd_my_read_metadata(MYSQL *mysql, ulong field_count, uint field)
+{
+  return mthd_my_read_metadata_ex(mysql, &mysql->field_alloc,
+                                  field_count, field);
+}
+
 /****************************************************************************
 ** Init MySQL structure or allocate one
 ****************************************************************************/
@@ -2314,7 +2368,6 @@ int mthd_my_read_query_result(MYSQL *mysql)
 {
   uchar *pos;
   ulong field_count;
-  MYSQL_DATA *fields;
   ulong length;
   my_bool can_local_infile= (mysql->options.extension) && (mysql->extension->auto_local_infile != WAIT_FOR_QUERY);
 
@@ -2342,12 +2395,14 @@ get_info:
     mysql->server_status|= SERVER_STATUS_IN_TRANS;
 
   mysql->extra_info= net_field_length_ll(&pos); /* Maybe number of rec */
-  if (!(fields=mysql->methods->db_read_rows(mysql,(MYSQL_FIELD*) 0,
-                                            ma_result_set_rows(mysql))))
-    return(-1);
-  if (!(mysql->fields=unpack_fields(mysql, fields, &mysql->field_alloc,
-				    (uint) field_count, 1)))
-    return(-1);
+
+  /* Have to do a -1 here since metadata only has 7 fields */
+  /* also figure out what is mariadb field extension */
+  if (!(mysql->fields=mthd_my_read_metadata(mysql, field_count, ma_result_set_rows(mysql) - 1)))
+  {
+    ma_free_root(&mysql->field_alloc,MYF(0));
+    return(1);
+  }
   mysql->status=MYSQL_STATUS_GET_RESULT;
   mysql->field_count=field_count;
   return(0);
