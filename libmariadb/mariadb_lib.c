@@ -849,6 +849,92 @@ static size_t rset_field_offsets[]= {
   OFFSET(MYSQL_FIELD, org_name_length)
 };
 
+
+/**
+  Read field metadata from field descriptor and store it in MYSQL_FIELD structure.
+  String values in MYSQL_FIELD are allocated in a given allocator root.
+
+  @param mysql          connection handle
+  @param alloc          memory allocator root
+  @param default_value  flag telling if default values should be read from
+                        descriptor
+  @param server_capabilities  protocol capability flags which determine format of
+                              the descriptor
+  @param row            field descriptor
+  @param field          address of MYSQL_FIELD structure to store metadata in.
+
+  @returns 0 on success.
+*/
+
+int
+unpack_field(const MYSQL *mysql, MA_MEM_ROOT *alloc, my_bool default_value,
+             MYSQL_ROWS *row, MYSQL_FIELD *field)
+{
+  unsigned int i, field_count= sizeof(rset_field_offsets)/sizeof(size_t)/2;
+  char    *p;
+
+  for (i=0; i < field_count; i++)
+  {
+    switch(row->data[i][0]) {
+      case 0:
+        *(char **)(((char *)field) + rset_field_offsets[i*2])= ma_strdup_root(alloc, "");
+        *(unsigned int *)(((char *)field) + rset_field_offsets[i*2+1])= 0;
+        break;
+      default:
+        *(char **)(((char *)field) + rset_field_offsets[i*2])=
+          ma_strdup_root(alloc, (char *)row->data[i]);
+        *(unsigned int *)(((char *)field) + rset_field_offsets[i*2+1])=
+          (uint)(row->data[i+1] - row->data[i] - 1);
+        break;
+    }
+  }
+
+  field->extension= NULL;
+  if (ma_has_extended_type_info(mysql))
+  {
+    if (row->data[i+1] - row->data[i] > 1)
+    {
+      size_t len= row->data[i+1] - row->data[i] - 1;
+      MA_FIELD_EXTENSION *ext= new_ma_field_extension(alloc);
+      if ((field->extension= ext))
+        ma_field_extension_init_type_info(alloc, ext, row->data[i], len);
+    }
+    i++;
+  }
+
+  p= (char *)row->data[i];
+  /* filler */
+  field->charsetnr= uint2korr(p);
+  p+= 2;
+  field->length= (uint) uint4korr(p);
+  p+= 4;
+  field->type=   (enum enum_field_types)uint1korr(p);
+  p++;
+  field->flags= uint2korr(p);
+  p+= 2;
+  field->decimals= (uint) p[0];
+  p++;
+
+  /* filler */
+  p+= 2;
+
+  if (INTERNAL_NUM_FIELD(field))
+    field->flags|= NUM_FLAG;
+
+  i++;
+  /* This is used by deprecated function mysql_list_fields only,
+     however the reported length is not correct, so we always zero it */
+  if (default_value && row->data[i])
+    field->def=ma_strdup_root(alloc,(char*) row->data[i]);
+  else
+    field->def=0;
+  field->def_length= 0;
+
+  field->max_length= 0;
+
+  return 0;
+}
+
 MYSQL_FIELD *
 unpack_fields(const MYSQL *mysql,
               MYSQL_DATA *data, MA_MEM_ROOT *alloc, uint fields,
@@ -856,76 +942,26 @@ unpack_fields(const MYSQL *mysql,
 {
   MYSQL_ROWS	*row;
   MYSQL_FIELD	*field,*result;
-  char    *p;
-  unsigned int i, field_count= sizeof(rset_field_offsets)/sizeof(size_t)/2;
 
+  // result is the pointer to the first field
+  // field is used for iteration
   field=result=(MYSQL_FIELD*) ma_alloc_root(alloc,sizeof(MYSQL_FIELD)*fields);
   if (!result)
+  {
+    // TODO: Raise out of memory error
     return(0);
+  }
+  memset(field, 0, sizeof(MYSQL_FIELD)*fields);
 
   for (row=data->data; row ; row = row->next,field++)
   {
+    /* fields count may be wrong */
     if (field >= result + fields)
       goto error;
 
-    for (i=0; i < field_count; i++)
-    {
-      switch(row->data[i][0]) {
-      case 0:
-       *(char **)(((char *)field) + rset_field_offsets[i*2])= ma_strdup_root(alloc, "");
-       *(unsigned int *)(((char *)field) + rset_field_offsets[i*2+1])= 0;
-       break;
-     default:
-       *(char **)(((char *)field) + rset_field_offsets[i*2])=
-         ma_strdup_root(alloc, (char *)row->data[i]);
-       *(unsigned int *)(((char *)field) + rset_field_offsets[i*2+1])=
-         (uint)(row->data[i+1] - row->data[i] - 1);
-       break;
-      }
-    }
+    if (unpack_field(mysql, alloc, default_value, row, field) != 0)
+      goto error;
 
-    field->extension= NULL;
-    if (ma_has_extended_type_info(mysql))
-    {
-      if (row->data[i+1] - row->data[i] > 1)
-      {
-        size_t len= row->data[i+1] - row->data[i] - 1;
-        MA_FIELD_EXTENSION *ext= new_ma_field_extension(alloc);
-        if ((field->extension= ext))
-          ma_field_extension_init_type_info(alloc, ext, row->data[i], len);
-      }
-      i++;
-    }
-
-    p= (char *)row->data[i];
-    /* filler */
-    field->charsetnr= uint2korr(p);
-    p+= 2;
-    field->length= (uint) uint4korr(p);
-    p+= 4;
-    field->type=   (enum enum_field_types)uint1korr(p);
-    p++;
-    field->flags= uint2korr(p);
-    p+= 2;
-    field->decimals= (uint) p[0];
-    p++;
-
-    /* filler */
-    p+= 2;
-
-    if (INTERNAL_NUM_FIELD(field))
-      field->flags|= NUM_FLAG;
-
-    i++;
-    /* This is used by deprecated function mysql_list_fields only,
-       however the reported length is not correct, so we always zero it */
-    if (default_value && row->data[i])
-      field->def=ma_strdup_root(alloc,(char*) row->data[i]);
-    else
-      field->def=0;
-    field->def_length= 0;
-
-    field->max_length= 0;
   }
   if (field < result + fields)
     goto error;
