@@ -160,6 +160,7 @@ enum enum_server_command
 #define CLIENT_CONNECT_ATTRS     (1UL << 20)
 #define CLIENT_CAN_HANDLE_EXPIRED_PASSWORDS (1UL << 22)
 #define CLIENT_SESSION_TRACKING  (1UL << 23)
+#define CLIENT_DEPRECATE_EOF     (1UL << 24)
 #define CLIENT_PROGRESS          (1UL << 29) /* client supports progress indicator */
 #define CLIENT_PROGRESS_OBSOLETE  CLIENT_PROGRESS 
 #define CLIENT_SSL_VERIFY_SERVER_CERT (1UL << 30)
@@ -201,6 +202,7 @@ enum enum_server_command
                                  CLIENT_REMEMBER_OPTIONS |\
                                  CLIENT_PLUGIN_AUTH |\
                                  CLIENT_SESSION_TRACKING |\
+                                 CLIENT_DEPRECATE_EOF |\
                                  CLIENT_CONNECT_ATTRS)
 
 #define CLIENT_CAPABILITIES	(CLIENT_MYSQL | \
@@ -212,6 +214,7 @@ enum enum_server_command
                                  CLIENT_PROTOCOL_41 |\
                                  CLIENT_PLUGIN_AUTH |\
                                  CLIENT_SESSION_TRACKING |\
+                                 CLIENT_DEPRECATE_EOF |\
                                  CLIENT_CONNECT_ATTRS)
 
 #define CLIENT_DEFAULT_FLAGS ((CLIENT_SUPPORTED_FLAGS & ~CLIENT_COMPRESS)\
