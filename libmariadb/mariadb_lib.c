@@ -4432,41 +4432,41 @@ struct st_mariadb_api MARIADB_API=
  */
 struct st_mariadb_methods MARIADB_DEFAULT_METHODS = {
   /* open a connection */
-  mthd_my_real_connect,
+  mthd_my_real_connect, // db_connect
   /* close connection */
-  mysql_close_slow_part,
+  mysql_close_slow_part, // db_close
   /* send command to server */
-  mthd_my_send_cmd,
+  mthd_my_send_cmd, // db_command
   /* skip result set */
-  mthd_my_skip_result,
+  mthd_my_skip_result, // db_skip_result
   /* read response packet */
-  mthd_my_read_query_result,
+  mthd_my_read_query_result, // db_read_query_result
   /* read all rows from a result set */
-  mthd_my_read_rows,
+  mthd_my_read_rows, // db_read_rows
   /* read one/next row */
-  mthd_my_read_one_row,
+  mthd_my_read_one_row, // db_read_one_row
   /* check if datatype is supported */
-  mthd_supported_buffer_type,
+  mthd_supported_buffer_type, // db_supported_buffer_type
   /* read response packet from prepare */
-  mthd_stmt_read_prepare_response,
+  mthd_stmt_read_prepare_response, // db_read_prepare_response
   /* read response from stmt execute */
-  mthd_my_read_query_result,
+  mthd_my_read_query_result, // db_read_stmt_result
   /* get result set metadata for a prepared statement */
-  mthd_stmt_get_result_metadata,
+  mthd_stmt_get_result_metadata, // db_stmt_get_result_metadata
   /* get param metadata for a prepared statement */
-  mthd_stmt_get_param_metadata,
+  mthd_stmt_get_param_metadata, // db_stmt_get_param_metadata
   /* read all rows (buffered) */
-  mthd_stmt_read_all_rows,
+  mthd_stmt_read_all_rows, // db_stmt_read_all_rows
   /* fetch one row (unbuffered) */
-  mthd_stmt_fetch_row,
+  mthd_stmt_fetch_row, // db_stmt_fetch
   /* store values in bind buffer */
-  mthd_stmt_fetch_to_bind,
+  mthd_stmt_fetch_to_bind, // db_stmt_fetch_to_bind
   /* skip unbuffered stmt result */
-  mthd_stmt_flush_unbuffered,
+  mthd_stmt_flush_unbuffered, // db_stmt_flush_unbuffered
   /* set error */
-  my_set_error,
+  my_set_error, // set_error
   /* invalidate statements */
-  ma_invalidate_stmts,
+  ma_invalidate_stmts, // invalidate_stmts
   /* API functions */
-  &MARIADB_API
+  &MARIADB_API // api
 };
