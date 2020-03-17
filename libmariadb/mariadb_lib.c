@@ -1151,14 +1151,18 @@ MYSQL_FIELD *mthd_my_read_metadata_ex(MYSQL *mysql, MA_MEM_ROOT *alloc,
       return NULL;
   }
   /* Read EOF packet as we don't yet send CLIENT_DEPRECATE_EOF flag */
-  if (packet_error == ma_net_safe_read(mysql))
-    return 0;
-
-  pos= net->read_pos;
-  if (*pos == 254)
+  /* TODO: remove CLIENT_CAPABILITIES */
+  if (!(mysql->server_capabilities & CLIENT_CAPABILITIES & CLIENT_DEPRECATE_EOF))
   {
-    mysql->warning_count= uint2korr(pos + 1);
-    mysql->server_status= uint2korr(pos + 3);
+    if (packet_error == ma_net_safe_read(mysql))
+      return 0;
+
+    pos= net->read_pos;
+    if (*pos == 254)
+    {
+      mysql->warning_count= uint2korr(pos + 1);
+      mysql->server_status= uint2korr(pos + 3);
+    }
   }
 
   return result;

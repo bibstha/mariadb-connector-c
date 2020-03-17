@@ -143,6 +143,9 @@ my_bool mthd_supported_buffer_type(enum enum_field_types type)
 
 static my_bool madb_reset_stmt(MYSQL_STMT *stmt, unsigned int flags);
 static my_bool mysql_stmt_internal_reset(MYSQL_STMT *stmt, my_bool is_close);
+extern MYSQL_FIELD *mthd_my_read_metadata(MYSQL *mysql, ulong field_count, uint field);
+extern MYSQL_FIELD *mthd_my_read_metadata_ex(MYSQL *mysql, MA_MEM_ROOT *alloc,
+                                     ulong field_count, uint field);
 static int stmt_unbuffered_eof(MYSQL_STMT *stmt __attribute__((unused)),
                                uchar **row __attribute__((unused)))
 {
@@ -1579,27 +1582,22 @@ my_bool mthd_stmt_read_prepare_response(MYSQL_STMT *stmt)
 
 my_bool mthd_stmt_get_param_metadata(MYSQL_STMT *stmt)
 {
-  MYSQL_DATA *result;
-
-  if (!(result= stmt->mysql->methods->db_read_rows(stmt->mysql, (MYSQL_FIELD *)0,
-                                                   7 + ma_extended_type_info_rows(stmt->mysql))))
+  if (!(mthd_my_read_metadata(stmt->mysql, stmt->param_count,
+                              7 + ma_extended_type_info_rows(stmt->mysql))))
     return(1);
 
-  free_rows(result);
+  /* free memory allocated by mthd_my_read_metadata() for parameters data */
+  ma_free_root(&stmt->mysql->field_alloc, MYF(0));
   return(0);
 }
 
 my_bool mthd_stmt_get_result_metadata(MYSQL_STMT *stmt)
 {
-  MYSQL_DATA *result;
   MA_MEM_ROOT *fields_ma_alloc_root= &((MADB_STMT_EXTENSION *)stmt->extension)->fields_ma_alloc_root;
+  if (!(stmt->fields= mthd_my_read_metadata_ex(stmt->mysql, fields_ma_alloc_root, stmt->field_count,
+                                           7 + ma_extended_type_info_rows(stmt->mysql))))
+    return(1);
 
-  if (!(result= stmt->mysql->methods->db_read_rows(stmt->mysql, (MYSQL_FIELD *)0,
-                                                   7 + ma_extended_type_info_rows(stmt->mysql))))
-    return(1);
-  if (!(stmt->fields= unpack_fields(stmt->mysql, result, fields_ma_alloc_root,
-          stmt->field_count, 0)))
-    return(1);
   return(0);
 }
 
@@ -1668,8 +1666,7 @@ int STDCALL mysql_stmt_prepare(MYSQL_STMT *stmt, const char *query, unsigned lon
       mysql->methods->db_read_prepare_response(stmt))
     goto fail;
 
-  /* metadata not supported yet */
-
+  /* metadata not supported yet, read and discard */
   if (stmt->param_count &&
       stmt->mysql->methods->db_stmt_get_param_metadata(stmt))
   {
