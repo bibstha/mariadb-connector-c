@@ -157,7 +157,7 @@ static int stmt_unbuffered_fetch(MYSQL_STMT *stmt, uchar **row)
 {
   ulong pkt_len;
 
-  pkt_len= ma_net_safe_read(stmt->mysql);
+  pkt_len= ma_net_safe_read(stmt->mysql, NULL);
 
   if (pkt_len == packet_error)
   {
@@ -201,7 +201,7 @@ int mthd_stmt_read_all_rows(MYSQL_STMT *stmt)
 
   pprevious= &result->data;
 
-  while ((packet_len = ma_net_safe_read(stmt->mysql)) != packet_error)
+  while ((packet_len = ma_net_safe_read(stmt->mysql, NULL)) != packet_error)
   {
     p= stmt->mysql->net.read_pos;
     // TODO: is_data_packet
@@ -340,32 +340,32 @@ static int stmt_cursor_fetch(MYSQL_STMT *stmt, uchar **row)
 /* flush one result set */
 void mthd_stmt_flush_unbuffered(MYSQL_STMT *stmt)
 {
+  MYSQL *mysql = stmt->mysql;
   ulong packet_len;
+  my_bool is_data_packet;
+
   int in_resultset= stmt->state > MYSQL_STMT_EXECUTED &&
                     stmt->state < MYSQL_STMT_FETCH_DONE;
-  while ((packet_len = ma_net_safe_read(stmt->mysql)) != packet_error)
+
+  // TODO: Figure out how to use in_resultset
+  do
   {
-    uchar *pos= stmt->mysql->net.read_pos;
-    if (!in_resultset && *pos == 0) /* OK */
-    {
-      pos++;
-      net_field_length(&pos);
-      net_field_length(&pos);
-      stmt->mysql->server_status= uint2korr(pos);
+    packet_len = ma_net_safe_read(mysql, &is_data_packet);
+    if (packet_len == packet_error)
       goto end;
-    }
-    if (packet_len < 8 && *pos == 254) /* EOF */
-    {
-      if (mariadb_connection(stmt->mysql))
-      {
-        stmt->mysql->server_status= uint2korr(pos + 3);
-        if (in_resultset)
-          goto end;
-        in_resultset= 1;
-      }
-      else
-        goto end;
-    }
+
+  }
+  while (mysql->net.read_pos[0] == 0 || is_data_packet);
+
+  uchar *pos= mysql->net.read_pos + 1;
+  if (mysql->server_capabilities & CLIENT_CAPABILITIES & CLIENT_DEPRECATE_EOF &&
+      !is_data_packet)
+    ma_read_ok_packet(mysql, pos, packet_len);
+  else
+  {
+    mysql->warning_count= uint2korr(pos);
+    pos+=2;
+    mysql->server_status=uint2korr(pos);
   }
 end:
   stmt->state= MYSQL_STMT_FETCH_DONE;
@@ -1558,7 +1558,7 @@ my_bool mthd_stmt_read_prepare_response(MYSQL_STMT *stmt)
   ulong packet_length;
   uchar *p;
 
-  if ((packet_length= ma_net_safe_read(stmt->mysql)) == packet_error)
+  if ((packet_length= ma_net_safe_read(stmt->mysql, NULL)) == packet_error)
     return(1);
 
   p= (uchar *)stmt->mysql->net.read_pos;
@@ -1875,7 +1875,8 @@ int stmt_read_execute_response(MYSQL_STMT *stmt)
     if (mysql->server_status & SERVER_STATUS_CURSOR_EXISTS)
       mysql->server_status&= ~SERVER_STATUS_CURSOR_EXISTS;
 
-    if (!ret && (stmt->flags & CURSOR_TYPE_READ_ONLY))
+    if (!ret && (stmt->flags & CURSOR_TYPE_READ_ONLY) &&
+        mysql->field_count != 0)
     {
       /*
         server can now respond with a cursor - then the respond will be
@@ -1887,7 +1888,7 @@ int stmt_read_execute_response(MYSQL_STMT *stmt)
         (the reset of the result set will be read in prepare_to_fetch_result).
       */
 
-      if ((pkt_len= ma_net_safe_read(mysql)) == packet_error)
+      if ((pkt_len= ma_net_safe_read(mysql, NULL)) == packet_error)
         return(1);
 
 
