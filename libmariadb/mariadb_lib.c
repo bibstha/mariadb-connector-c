@@ -142,6 +142,7 @@ struct st_mariadb_methods MARIADB_DEFAULT_METHODS;
 #define IS_CONNHDLR_ACTIVE(mysql)\
   ((mysql)->extension && (mysql)->extension->conn_hdlr)
 
+int ma_read_ok_packet(MYSQL *mysql, uchar *pos, ulong length);
 static void end_server(MYSQL *mysql);
 static void mysql_close_memory(MYSQL *mysql);
 void read_user_name(char *name);
@@ -1001,7 +1002,8 @@ MYSQL_DATA *mthd_my_read_rows(MYSQL *mysql,MYSQL_FIELD *mysql_fields,
   result->rows=0;
   result->fields=fields;
 
-  while (*(cp=net->read_pos) != 254 || pkt_len >= 8)
+  // TODO: is_data_packet
+  while (*(cp=net->read_pos) != 254)
   {
     result->rows++;
     if (!(cur= (MYSQL_ROWS*) ma_alloc_root(&result->alloc,
@@ -1054,10 +1056,17 @@ MYSQL_DATA *mthd_my_read_rows(MYSQL *mysql,MYSQL_FIELD *mysql_fields,
   /* save status */
   if (pkt_len > 1)
   {
-    cp++;
-    mysql->warning_count= uint2korr(cp);
-    cp+= 2;
-    mysql->server_status= uint2korr(cp);
+    // TODO: introduce is_data_packet
+    if (mysql->server_capabilities & CLIENT_CAPABILITIES & CLIENT_DEPRECATE_EOF
+        && *cp == 254)
+    {
+      ma_read_ok_packet(mysql, cp + 1, pkt_len);
+    }
+    else
+    {
+      mysql->warning_count= uint2korr(cp + 1);
+      mysql->server_status= uint2korr(cp + 3);
+    }
   }
   return(result);
 }

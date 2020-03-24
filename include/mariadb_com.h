@@ -206,6 +206,7 @@ enum enum_server_command
                                  CLIENT_REMEMBER_OPTIONS |\
                                  CLIENT_PLUGIN_AUTH |\
                                  CLIENT_SESSION_TRACKING |\
+                                 CLIENT_DEPRECATE_EOF |\
                                  CLIENT_CONNECT_ATTRS)
 
 #define CLIENT_CAPABILITIES	(CLIENT_MYSQL | \
@@ -217,6 +218,7 @@ enum enum_server_command
                                  CLIENT_PROTOCOL_41 |\
                                  CLIENT_PLUGIN_AUTH |\
                                  CLIENT_SESSION_TRACKING |\
+                                 CLIENT_DEPRECATE_EOF |\
                                  CLIENT_CONNECT_ATTRS)
 
 #define CLIENT_DEFAULT_FLAGS ((CLIENT_SUPPORTED_FLAGS & ~CLIENT_COMPRESS)\

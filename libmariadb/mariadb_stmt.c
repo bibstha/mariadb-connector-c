@@ -146,6 +146,7 @@ static my_bool mysql_stmt_internal_reset(MYSQL_STMT *stmt, my_bool is_close);
 extern MYSQL_FIELD *mthd_my_read_metadata(MYSQL *mysql, ulong field_count, uint field);
 extern MYSQL_FIELD *mthd_my_read_metadata_ex(MYSQL *mysql, MA_MEM_ROOT *alloc,
                                      ulong field_count, uint field);
+extern int ma_read_ok_packet(MYSQL *mysql, uchar *pos, ulong length);
 static int stmt_unbuffered_eof(MYSQL_STMT *stmt __attribute__((unused)),
                                uchar **row __attribute__((unused)))
 {
@@ -203,7 +204,9 @@ int mthd_stmt_read_all_rows(MYSQL_STMT *stmt)
   while ((packet_len = ma_net_safe_read(stmt->mysql)) != packet_error)
   {
     p= stmt->mysql->net.read_pos;
-    if (packet_len > 7 || p[0] != 254)
+    // TODO: is_data_packet
+    // OK packets can now be greater than 7 bytes: https://dev.mysql.com/worklog/task/?id=7766
+    if (p[0] != 254)
     {
       /* allocate space for rows */
       if (!(current= (MYSQL_ROWS *)ma_alloc_root(&result->alloc, sizeof(MYSQL_ROWS) + packet_len)))
@@ -1856,6 +1859,7 @@ int stmt_read_execute_response(MYSQL_STMT *stmt)
 {
   MYSQL *mysql= stmt->mysql;
   int ret;
+  size_t pkt_len;
 
   if (!mysql)
     return(1);
@@ -1865,6 +1869,41 @@ int stmt_read_execute_response(MYSQL_STMT *stmt)
   /* if a reconnect occurred, our connection handle is invalid */
   if (!stmt->mysql)
     return(1);
+
+  if ((mysql->server_capabilities & CLIENT_CAPABILITIES & CLIENT_DEPRECATE_EOF))
+  {
+    if (mysql->server_status & SERVER_STATUS_CURSOR_EXISTS)
+      mysql->server_status&= ~SERVER_STATUS_CURSOR_EXISTS;
+
+    if (!ret && (stmt->flags & CURSOR_TYPE_READ_ONLY))
+    {
+      /*
+        server can now respond with a cursor - then the respond will be
+        <Metadata><OK> or with binary rows result set <Metadata><row(s)><OK>.
+        The former can be the case when the prepared statement is a procedure
+        invocation, ie. call(). There also other cases. When server responds
+        with <OK> (cursor) packet we read it and get the server status. In case
+        it responds with binary row we add it to the binary rows result set
+        (the reset of the result set will be read in prepare_to_fetch_result).
+      */
+
+      if ((pkt_len= ma_net_safe_read(mysql)) == packet_error)
+        return(1);
+
+
+      // TODO: We are not ready to read the binary row yet
+      /* if (is_data_packet) */
+      /* { */
+      /*   DBUG_ASSERT(stmt->result.rows == 0); */
+      /*   prev_ptr= &stmt->result.data; */
+      /*   if (add_binary_row(net, stmt, pkt_len, &prev_ptr)) */
+      /*     DBUG_RETURN(1); */
+      /* } */
+      /* else */
+      if (mysql->net.read_pos[0] == 254) // remove this and replace with is_data_packet
+        ma_read_ok_packet(mysql, mysql->net.read_pos + 1, pkt_len);
+    }
+  }
 
   /* update affected rows, also if an error occurred */
   stmt->upsert_status.affected_rows= stmt->mysql->affected_rows;
