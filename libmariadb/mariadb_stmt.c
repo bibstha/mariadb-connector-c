@@ -172,7 +172,7 @@ static int stmt_unbuffered_fetch(MYSQL_STMT *stmt, uchar **row)
   if (mysql->net.read_pos[0] != 0 && !is_data_packet)
   {
     /* in case of new client read the OK packet */
-    if (mysql->server_capabilities & CLIENT_CAPABILITIES & CLIENT_DEPRECATE_EOF)
+    if (mysql->server_capabilities & CLIENT_DEPRECATE_EOF)
       ma_read_ok_packet(mysql, mysql->net.read_pos + 1, pkt_len);
     *row = NULL;
     stmt->fetch_row_func= stmt_unbuffered_eof;
@@ -212,7 +212,6 @@ int mthd_stmt_read_all_rows(MYSQL_STMT *stmt)
   while ((packet_len = ma_net_safe_read(stmt->mysql, &is_data_packet)) != packet_error)
   {
     p= stmt->mysql->net.read_pos;
-    // OK packets can now be greater than 7 bytes: https://dev.mysql.com/worklog/task/?id=7766
     if (p[0] == 0 || is_data_packet)
     {
       /* allocate space for rows */
@@ -287,12 +286,12 @@ int mthd_stmt_read_all_rows(MYSQL_STMT *stmt)
     } else  /* end of stream */
     {
       *pprevious= 0;
-      /* sace status info */
-      if (stmt->mysql->server_capabilities & CLIENT_CAPABILITIES & CLIENT_DEPRECATE_EOF &&
-          !is_data_packet)
+      /* save status info */
+      if (stmt->mysql->server_capabilities & CLIENT_DEPRECATE_EOF && !is_data_packet)
         ma_read_ok_packet(stmt->mysql, p + 1, packet_len);
       else
         stmt->upsert_status.warning_count= stmt->mysql->warning_count= uint2korr(p + 1);
+
       /*
         OUT parameters result sets has SERVER_PS_OUT_PARAMS and
         SERVER_MORE_RESULTS_EXISTS flags in first EOF_Packet only.
@@ -309,9 +308,8 @@ int mthd_stmt_read_all_rows(MYSQL_STMT *stmt)
       if (stmt->mysql->server_status & SERVER_PS_OUT_PARAMS)
       {
         stmt->upsert_status.server_status= stmt->mysql->server_status= uint2korr(p + 3)
-          | SERVER_PS_OUT_PARAMS;
-          /* TODO mariadb doesn't support SERVER_MORE_RESULTS_EXISTS yet */
-          /* | (stmt->mysql->server_status & SERVER_MORE_RESULTS_EXISTS); */
+          | SERVER_PS_OUT_PARAMS
+          | (stmt->mysql->server_status & SERVER_MORE_RESULTS_EXIST);
       }
       else
         stmt->upsert_status.server_status= stmt->mysql->server_status= uint2korr(p + 3);
@@ -389,7 +387,7 @@ void mthd_stmt_flush_unbuffered(MYSQL_STMT *stmt)
       mysql->server_status= uint2korr(pos);
       goto end;
     }
-    if (!is_data_packet) /* EOF */
+    if (*pos != 0 && !is_data_packet) /* EOF */
     {
       if (mariadb_connection(mysql))
       {
@@ -400,8 +398,8 @@ void mthd_stmt_flush_unbuffered(MYSQL_STMT *stmt)
       }
       else
       {
-        // TODO: Do this only if deprecate flag is sent
-        ma_read_ok_packet(mysql, pos + 1, packet_len);
+        if (stmt->mysql->server_capabilities & CLIENT_DEPRECATE_EOF)
+          ma_read_ok_packet(mysql, pos + 1, packet_len);
         goto end;
       }
     }
@@ -1493,7 +1491,7 @@ int STDCALL mysql_stmt_fetch(MYSQL_STMT *stmt)
   if (stmt->state == MYSQL_STMT_FETCH_DONE)
     return(MYSQL_NO_DATA);
 
-  if ((rc= stmt->mysql->methods->db_stmt_fetch(stmt, &row))) // mthd_stmt_fetch_row
+  if ((rc= stmt->mysql->methods->db_stmt_fetch(stmt, &row)))
   {
     stmt->state= MYSQL_STMT_FETCH_DONE;
     stmt->mysql->status= MYSQL_STATUS_READY;
@@ -1716,10 +1714,6 @@ int STDCALL mysql_stmt_prepare(MYSQL_STMT *stmt, const char *query, unsigned lon
   }
 
   /* allocated bind buffer for parameters */
-
-  /* TODO: the following 2 lines exist in mysql, do we need them? */
-    /* if (!(mysql->server_status & SERVER_STATUS_AUTOCOMMIT)) */
-    /*   mysql->server_status|= SERVER_STATUS_IN_TRANS; */
   if (stmt->field_count &&
       stmt->mysql->methods->db_stmt_get_result_metadata(stmt))
   {
@@ -1914,11 +1908,21 @@ int stmt_read_execute_response(MYSQL_STMT *stmt)
   if (!stmt->mysql)
     return(1);
 
-  if ((mysql->server_capabilities & CLIENT_CAPABILITIES & CLIENT_DEPRECATE_EOF))
+  if ((mysql->server_capabilities & CLIENT_DEPRECATE_EOF))
   {
     if (mysql->server_status & SERVER_STATUS_CURSOR_EXISTS)
       mysql->server_status&= ~SERVER_STATUS_CURSOR_EXISTS;
 
+    /*
+      After having read the query result, we need to make sure that the client
+      does not end up into a hang waiting for the server to send a packet.
+      If the CURSOR_TYPE_READ_ONLY flag is set, we would want to perform the
+      additional packet read mainly for prepared statements involving SELECT
+      queries. For SELECT queries, the result format would either be
+      <Metadata><OK> or <Metadata><rows><OK>. We would have read the metadata
+      by now and have the field_count populated. The check for field_count will
+      help determine if we can expect an additional packet from the server.
+    */
     if (!ret && (stmt->flags & CURSOR_TYPE_READ_ONLY) &&
         mysql->field_count != 0)
     {
@@ -1932,20 +1936,17 @@ int stmt_read_execute_response(MYSQL_STMT *stmt)
         (the reset of the result set will be read in prepare_to_fetch_result).
       */
 
-      // TODO: refactor binary reading code
       if ((pkt_len= ma_net_safe_read(mysql, &is_data_packet)) == packet_error)
         return(1);
 
-      /* if (is_data_packet) */
-      /* { */
-      /*   DBUG_ASSERT(stmt->result.rows == 0); */
-      /*   prev_ptr= &stmt->result.data; */
-      /*   if (add_binary_row(net, stmt, pkt_len, &prev_ptr)) */
-      /*     DBUG_RETURN(1); */
-      /* } */
-      /* else */
-      assert(!is_data_packet); // Cannot handle data packet right now
-      ma_read_ok_packet(mysql, mysql->net.read_pos + 1, pkt_len);
+      if (is_data_packet)
+      {
+        // TODO: <metadata><row(s)><OK> not supported right now
+        // needs a refactoring of reading binary data code
+        return 1;
+      }
+      else
+        ma_read_ok_packet(mysql, mysql->net.read_pos + 1, pkt_len);
     }
   }
 

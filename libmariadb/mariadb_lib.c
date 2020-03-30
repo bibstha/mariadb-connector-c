@@ -599,13 +599,13 @@ end_server(MYSQL *mysql)
 void mthd_my_skip_result(MYSQL *mysql)
 {
   ulong pkt_len;
+  my_bool is_data_packet;
 
   do {
-    // TODO: Should we check for is_data_packet?
-    pkt_len= ma_net_safe_read(mysql, NULL);
+    pkt_len= ma_net_safe_read(mysql, &is_data_packet);
     if (pkt_len == packet_error)
       break;
-  } while (pkt_len > 8 || mysql->net.read_pos[0] != 254);
+  } while (mysql->net.read_pos[0] == 0 || is_data_packet);
   return;
 }
 
@@ -980,14 +980,9 @@ unpack_fields(const MYSQL *mysql,
   MYSQL_ROWS	*row;
   MYSQL_FIELD	*field,*result;
 
-  // result is the pointer to the first field
-  // field is used for iteration
   field=result=(MYSQL_FIELD*) ma_alloc_root(alloc,sizeof(MYSQL_FIELD)*fields);
   if (!result)
-  {
-    // TODO: Raise out of memory error
     return(0);
-  }
   memset(field, 0, sizeof(MYSQL_FIELD)*fields);
 
   for (row=data->data; row ; row = row->next,field++)
@@ -1092,12 +1087,9 @@ MYSQL_DATA *mthd_my_read_rows(MYSQL *mysql,MYSQL_FIELD *mysql_fields,
   /* save status */
   if (pkt_len > 1)
   {
-    // TODO: introduce is_data_packet
-    if (mysql->server_capabilities & CLIENT_CAPABILITIES & CLIENT_DEPRECATE_EOF
-        && *cp == 254)
-    {
+    // We know this is the OK packet
+    if (mysql->server_capabilities & CLIENT_DEPRECATE_EOF)
       ma_read_ok_packet(mysql, cp + 1, pkt_len);
-    }
     else
     {
       mysql->warning_count= uint2korr(cp + 1);
@@ -1169,6 +1161,19 @@ int mthd_my_read_one_row(MYSQL *mysql,uint fields,MYSQL_ROW row, ulong *lengths)
   return 0;
 }
 
+/**
+ * When CLIENT_DEPRECATE_EOF wasn't sent to server, the response looked like
+ * <FieldCount><Metadata><EOF><ResultSet * n><EOF>, so mthd_my_read_query_result and 
+ * mthd_stmt_read_prepare_response could simply look for 2 EOF.
+ *
+ * With CLIENT_DEPRECATE_EOF now being sent, the response looks like
+ * <FieldCount><Metadata><ResultSet * n><EOF>. The number of metadata to look for
+ * is already available in FieldCount therefore first EOF is not necessary.
+ *
+ * Therefore this method is introduced to handle the new format
+ * and is called by both
+ * mthd_my_read_query_result and mthd_stmt_read_prepare_response
+ */
 MYSQL_FIELD *mthd_my_read_metadata_ex(MYSQL *mysql, MA_MEM_ROOT *alloc,
                                      ulong field_count, uint field)
 {
@@ -1203,9 +1208,7 @@ MYSQL_FIELD *mthd_my_read_metadata_ex(MYSQL *mysql, MA_MEM_ROOT *alloc,
     if(unpack_field(mysql, alloc, 0, &data, fields++))
       return NULL;
   }
-  /* Read EOF packet as we don't yet send CLIENT_DEPRECATE_EOF flag */
-  /* TODO: remove CLIENT_CAPABILITIES */
-  if (!(mysql->server_capabilities & CLIENT_CAPABILITIES & CLIENT_DEPRECATE_EOF))
+  if (!(mysql->server_capabilities & CLIENT_DEPRECATE_EOF))
   {
     if (packet_error == ma_net_safe_read(mysql, NULL))
       return 0;
@@ -2453,9 +2456,8 @@ get_info:
 
   mysql->extra_info= net_field_length_ll(&pos); /* Maybe number of rec */
 
-  /* Have to do a -1 here since metadata only has 7 fields */
-  /* also figure out what is mariadb field extension */
-  if (!(mysql->fields=mthd_my_read_metadata(mysql, field_count, ma_result_set_rows(mysql) - 1)))
+  if (!(mysql->fields=mthd_my_read_metadata(mysql, field_count,
+          7 + ma_extended_type_info_rows(mysql))))
   {
     ma_free_root(&mysql->field_alloc,MYF(0));
     return(1);
