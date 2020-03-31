@@ -379,28 +379,45 @@ void mthd_stmt_flush_unbuffered(MYSQL_STMT *stmt)
   while ((packet_len = ma_net_safe_read(mysql, &is_data_packet)) != packet_error)
   {
     pos= mysql->net.read_pos;
-    if (!in_resultset && *pos == 0) /* OK */
+    if (stmt->mysql->server_capabilities & CLIENT_DEPRECATE_EOF)
     {
-      pos++;
-      net_field_length(&pos);
-      net_field_length(&pos);
-      mysql->server_status= uint2korr(pos);
-      goto end;
-    }
-    if (*pos != 0 && !is_data_packet) /* EOF */
-    {
-      if (mariadb_connection(mysql))
+      if (!in_resultset && *pos == 0) /* actual OK packet with 0 */
       {
-        mysql->server_status= uint2korr(pos + 3);
-        if (in_resultset)
-          goto end;
-        in_resultset= 1;
-      }
-      else
-      {
-        if (stmt->mysql->server_capabilities & CLIENT_DEPRECATE_EOF)
-          ma_read_ok_packet(mysql, pos + 1, packet_len);
+        ma_read_ok_packet(mysql, pos + 1, packet_len);
         goto end;
+      }
+
+      in_resultset = 1; // so we do not check for OK pkt with 0 next time in the loop
+
+      if (*pos != 0 && !is_data_packet)
+      {
+        ma_read_ok_packet(mysql, pos + 1, packet_len);
+        goto end;
+      }
+    }
+    else
+    {
+      if (!in_resultset && *pos == 0) /* OK */
+      {
+        pos++;
+        net_field_length(&pos);
+        net_field_length(&pos);
+        mysql->server_status= uint2korr(pos);
+        goto end;
+      }
+      if (packet_len < 8 && *pos == 254) /* EOF */
+      {
+        if (mariadb_connection(mysql))
+        {
+          mysql->server_status= uint2korr(pos + 3);
+          if (in_resultset)
+            goto end;
+          in_resultset= 1;
+        }
+        else
+        {
+          goto end;
+        }
       }
     }
   }
