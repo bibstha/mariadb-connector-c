@@ -1119,7 +1119,7 @@ int mthd_my_read_one_row(MYSQL *mysql,uint fields,MYSQL_ROW row, ulong *lengths)
 
   if (net->read_pos[0] != 0 && !is_data_packet)
   {
-    if (mysql->server_capabilities & CLIENT_CAPABILITIES & CLIENT_DEPRECATE_EOF)
+    if (mysql->server_capabilities & CLIENT_DEPRECATE_EOF)
       ma_read_ok_packet(mysql, net->read_pos + 1, pkt_len);
     else
     {
@@ -1162,17 +1162,15 @@ int mthd_my_read_one_row(MYSQL *mysql,uint fields,MYSQL_ROW row, ulong *lengths)
 }
 
 /**
- * When CLIENT_DEPRECATE_EOF wasn't sent to server, the response looked like
- * <FieldCount><Metadata><EOF><ResultSet * n><EOF>, so mthd_my_read_query_result and 
- * mthd_stmt_read_prepare_response could simply look for 2 EOF.
+ * If CLIENT_DEPRECATE_EOF isn't supported by the server, the response looked like
+ * <FieldCount><Metadata><EOF><ResultSet * n><EOF>.
  *
- * With CLIENT_DEPRECATE_EOF now being sent, the response looks like
- * <FieldCount><Metadata><ResultSet * n><EOF>. The number of metadata to look for
- * is already available in FieldCount therefore first EOF is not necessary.
+ * Otherwise, the response looks like <FieldCount><Metadata><ResultSet * n><EOF>.
+ * The number of metadata to look for is already available in FieldCount
+ * therefore first EOF is not necessary.
  *
- * Therefore this method is introduced to handle the new format
- * and is called by both
- * mthd_my_read_query_result and mthd_stmt_read_prepare_response
+ * Therefore this method is introduced to just read packet metadata 
+ * and is called by both mthd_my_read_query_result and mthd_stmt_read_prepare_response
  */
 MYSQL_FIELD *mthd_my_read_metadata_ex(MYSQL *mysql, MA_MEM_ROOT *alloc,
                                      ulong field_count, uint field)
