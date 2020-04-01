@@ -107,6 +107,7 @@ static char *password = 0;
 static unsigned int port = 0;
 static char *socketname = 0;
 static char *username = 0;
+static uchar is_mariadb= 0;
 /*
 static struct my_option test_options[] =
 {
@@ -419,13 +420,17 @@ MYSQL *test_connect(struct my_tests_st *test) {
 
 static int reset_connection(MYSQL *mysql) {
   int rc;
+  ulong mysql_ver;
 
   rc= mysql_change_user(mysql, username, password, schema);
   check_mysql_rc(rc, mysql);
-  if (mysql_get_server_version(mysql) < 50400)
+  mysql_ver = mysql_get_server_version(mysql);
+  if (mysql_ver < 50400)
     rc= mysql_query(mysql, "SET table_type='MyISAM'");
-  else
+  else if (mysql_ver < 50600)
     rc= mysql_query(mysql, "SET storage_engine='MyISAM'");
+  else
+    rc= mysql_query(mysql, "SET default_storage_engine='MyISAM'");
   check_mysql_rc(rc, mysql);
   rc= mysql_query(mysql, "SET sql_mode=''");
   check_mysql_rc(rc, mysql);
@@ -468,6 +473,7 @@ void run_tests(struct my_tests_st *test) {
   {
     diag("Testing against MySQL Server %s", mysql_get_server_info(mysql_default));
     diag("Host %s", mysql_get_host_info(mysql_default));
+    is_mariadb= mariadb_connection(mysql_default);
   }
   else
   {

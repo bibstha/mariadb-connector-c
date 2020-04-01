@@ -196,7 +196,7 @@ static int test_cuted_rows(MYSQL *mysql)
   check_mysql_rc(rc, mysql);
 
   count= mysql_warning_count(mysql);
-  FAIL_UNLESS(count == 2, "warnings != 2");
+  FAIL_UNLESS(count == 1, "warnings != 1");
 
   rc= mysql_query(mysql, "SHOW WARNINGS");
   check_mysql_rc(rc, mysql);
@@ -207,7 +207,7 @@ static int test_cuted_rows(MYSQL *mysql)
   rc= 0;
   while (mysql_fetch_row(result))
     rc++;
-  FAIL_UNLESS(rc == 2, "rowcount != 2");
+  FAIL_UNLESS(rc == 1, "rowcount != 1");
   mysql_free_result(result);
 
   rc= mysql_query(mysql, "INSERT INTO t1 VALUES('junk'), (876789)");

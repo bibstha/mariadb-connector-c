@@ -3426,6 +3426,8 @@ static int test_explain_bug(MYSQL *mysql)
   MYSQL_RES  *result;
   int        rc;
 
+  if (!is_mariadb)
+    return SKIP;
 
   mysql_autocommit(mysql, TRUE);
 
