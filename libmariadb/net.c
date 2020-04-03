@@ -31,11 +31,10 @@
 #include <signal.h>
 #include <errno.h>
 #include <sys/types.h>
+#include <ma_common.h>
 #ifndef _WIN32
 #include <poll.h>
 #endif
-
-#define MAX_PACKET_LENGTH (256L*256L*256L-1)
 
 /* net_buffer_length and max_allowed_packet are defined in mysql.h
    See bug conc-57

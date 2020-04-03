@@ -23,6 +23,7 @@
 #include <mysql.h>
 #include <hash.h>
 
+#define MAX_PACKET_LENGTH (256L*256L*256L-1)
 
 typedef struct st_mariadb_db_driver
 {
