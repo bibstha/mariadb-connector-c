@@ -256,16 +256,18 @@ int mthd_stmt_read_all_rows(MYSQL_STMT *stmt)
         /* sace status info */
         p++;
         stmt->upsert_status.warning_count= stmt->mysql->warning_count= uint2korr(p);
-        p+=2;
-        if (stmt->mysql->server_status & SERVER_PS_OUT_PARAMS)
-        {
-          stmt->upsert_status.server_status= stmt->mysql->server_status= uint2korr(p)
-            | SERVER_PS_OUT_PARAMS
-            | (stmt->mysql->server_status & SERVER_MORE_RESULTS_EXIST);
-        }
-        else
-          stmt->upsert_status.warning_count= stmt->mysql->server_status= uint2korr(p);
       }
+      p+=2;
+
+      if (stmt->mysql->server_status & SERVER_PS_OUT_PARAMS)
+      {
+        stmt->upsert_status.server_status= stmt->mysql->server_status= uint2korr(p)
+          | SERVER_PS_OUT_PARAMS
+          | (stmt->mysql->server_status & SERVER_MORE_RESULTS_EXIST);
+      }
+      else
+        stmt->upsert_status.server_status= uint2korr(p);
+
       stmt->result_cursor= result->data; 
       DBUG_RETURN(0);
     }
@@ -1531,7 +1533,6 @@ int STDCALL mysql_stmt_execute(MYSQL_STMT *stmt)
   request= (char *)mysql_stmt_execute_generate_request(stmt, &request_len);
   DBUG_PRINT("info",("request_len=%ld", request_len));
 
-  // TODO: here is where read read the stmt result
   ret= test(simple_command(mysql, MYSQL_COM_STMT_EXECUTE, request, request_len, 1, stmt) || 
       (mysql && mysql->methods->db_read_stmt_result && mysql->methods->db_read_stmt_result(mysql)));
   if (request)
