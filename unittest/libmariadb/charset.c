@@ -645,7 +645,7 @@ static int test_bug_54100(MYSQL *mysql)
   {
     /* ignore ucs2 */
     if (strcmp(row[0], "ucs2") && strcmp(row[0], "utf16le") && strcmp(row[0], "utf8mb4") && 
-        strcmp(row[0], "utf16") && strcmp(row[0], "utf32")) {
+        strcmp(row[0], "utf16") && strcmp(row[0], "utf32") && strcmp(row[0], "gb18030")) {
       rc= mysql_set_character_set(mysql, row[0]);
       check_mysql_rc(rc, mysql);
     }

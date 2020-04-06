@@ -3219,7 +3219,7 @@ static int test_datetime_ranges(MYSQL *mysql)
 
   rc= mysql_stmt_execute(stmt);
   check_stmt_rc(rc, stmt);
-  FAIL_IF(mysql_warning_count(mysql) != 2, "warning_count != 2");
+  FAIL_IF(mysql_warning_count(mysql) != 0, "warning_count != 0");
 
   if (verify_col_data(mysql, "t1", "day_ovfl", "838:59:59"))
     goto error;
