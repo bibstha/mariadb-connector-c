@@ -36,6 +36,7 @@
 #include <sys/stat.h>
 #include <signal.h>
 #include <time.h>
+#include <ma_dyncol.h>
 #ifdef HAVE_PWD_H
 #include <pwd.h>
 #endif
@@ -83,6 +84,7 @@ static MYSQL_PARAMETERS mariadb_internal_parameters=
 
 static my_bool mysql_client_init=0;
 static void mysql_close_options(MYSQL *mysql);
+static void ma_clear_session_state(MYSQL *mysql);
 extern my_bool  my_init_done;
 extern my_bool  mysql_ps_subsystem_initialized;
 extern my_bool mysql_handle_local_infile(MYSQL *mysql, const char *filename);
@@ -1373,6 +1375,11 @@ mysql_init(MYSQL *mysql)
   }
   else
     bzero((char*) (mysql),sizeof(*(mysql)));
+
+  if (!(mysql->extension= (struct st_mariadb_extension *)
+                          calloc(1, sizeof(struct st_mariadb_extension))))
+    goto error;
+
   mysql->options.connect_timeout=CONNECT_TIMEOUT;
   mysql->charset= default_charset_info;
   strmov(mysql->net.sqlstate, "00000");
@@ -1391,6 +1398,10 @@ mysql_init(MYSQL *mysql)
 #endif
   mysql->reconnect= 0;
   return mysql;
+error:
+  if (mysql->free_me)
+    my_free(mysql);
+  return 0;
 }
 
 
@@ -2326,6 +2337,7 @@ static void mysql_close_options(MYSQL *mysql)
 
 static void mysql_close_memory(MYSQL *mysql)
 {
+  ma_clear_session_state(mysql);
   my_free(mysql->host_info);
   my_free(mysql->user);
   my_free(mysql->passwd);
@@ -2368,6 +2380,20 @@ void mysql_close_slow_part(MYSQL *mysql)
   }
 }
 
+static void ma_clear_session_state(MYSQL *mysql)
+{
+  uint i;
+
+  if (!mysql || !mysql->extension)
+    return;
+
+  for (i= SESSION_TRACK_BEGIN; i <= SESSION_TRACK_END; i++)
+  {
+    list_free(mysql->extension->session_state[i].list, 0);
+  }
+  memset(mysql->extension->session_state, 0, sizeof(struct st_mariadb_session_state) * SESSION_TRACK_TYPES);
+}
+
 void STDCALL
 mysql_close(MYSQL *mysql)
 {
@@ -2390,6 +2416,7 @@ mysql_close(MYSQL *mysql)
     }
     mysql_close_memory(mysql);
     mysql_close_options(mysql);
+    ma_clear_session_state(mysql);
     mysql->host_info=mysql->user=mysql->passwd=mysql->db=0;
    
     /* Clear pointers for better safety */
@@ -2440,14 +2467,134 @@ get_info:
   pos=(uchar*) mysql->net.read_pos;
   if ((field_count= net_field_length(&pos)) == 0)
   {
+    size_t item_len;
     mysql->affected_rows= net_field_length_ll(&pos);
-    mysql->insert_id=	  net_field_length_ll(&pos);
+    mysql->insert_id= net_field_length_ll(&pos);
     mysql->server_status=uint2korr(pos); 
     pos+=2;
     mysql->warning_count=uint2korr(pos); 
     pos+=2;
-    if (pos < mysql->net.read_pos+length && net_field_length(&pos))
-      mysql->info=(char*) pos;
+    if (pos < mysql->net.read_pos+length)
+    {
+      if ((item_len= net_field_length(&pos)))
+        mysql->info=(char*) pos;
+
+      /* check if server supports session tracking */
+      if (mysql->server_capabilities & CLIENT_SESSION_TRACKING)
+      {
+        ma_clear_session_state(mysql);
+        pos+= item_len;
+
+        if (mysql->server_status & SERVER_SESSION_STATE_CHANGED)
+        {
+          int i;
+          if (pos < mysql->net.read_pos + length)
+          {
+            LIST *session_item;
+            MYSQL_LEX_STRING *str= NULL;
+            enum enum_session_state_type si_type;
+            uchar *old_pos= pos;
+            size_t item_len= net_field_length(&pos);  /* length for all items */
+
+            /* length was already set, so make sure that info will be zero terminated */
+            if (mysql->info)
+              *old_pos= 0;
+
+            while (item_len > 0)
+            {
+              size_t plen;
+              char *data;
+              old_pos= pos;
+              si_type= (enum enum_session_state_type)net_field_length(&pos);
+              switch(si_type) {
+              case SESSION_TRACK_GTIDS:
+                net_field_length(&pos); /* skip encoding */
+              case SESSION_TRACK_SCHEMA:
+              case SESSION_TRACK_STATE_CHANGE:
+              case SESSION_TRACK_TRANSACTION_CHARACTERISTICS:
+              case SESSION_TRACK_SYSTEM_VARIABLES:
+                if (si_type != SESSION_TRACK_STATE_CHANGE)
+                  net_field_length(&pos); /* ignore total length, item length will follow next */
+                plen= net_field_length(&pos);
+                if (!(session_item= ma_multi_malloc(0,
+                                    &session_item, sizeof(LIST),
+                                    &str, sizeof(MYSQL_LEX_STRING),
+                                    &data, plen,
+                                    NULL)))
+                {
+                  ma_clear_session_state(mysql);
+                  SET_CLIENT_ERROR(mysql, CR_OUT_OF_MEMORY, SQLSTATE_UNKNOWN, 0);
+                  return -1;
+                }
+                str->length= plen;
+                str->str= data;
+                memcpy(str->str, (char *)pos, plen);
+                pos+= plen;
+                session_item->data= str;
+                mysql->extension->session_state[si_type].list= list_add(mysql->extension->session_state[si_type].list, session_item);
+
+                /* in case schema has changed, we have to update mysql->db */
+                if (si_type == SESSION_TRACK_SCHEMA)
+                {
+                  free(mysql->db);
+                  mysql->db= malloc(plen + 1);
+                  memcpy(mysql->db, str->str, plen);
+                  mysql->db[plen]= 0;
+                }
+                else if (si_type == SESSION_TRACK_SYSTEM_VARIABLES)
+                {
+                  my_bool set_charset= 0;
+                  /* make sure that we update charset in case it has changed */
+                  if (!strncmp(str->str, "character_set_client", str->length))
+                    set_charset= 1;
+                  plen= net_field_length(&pos);
+                  if (!(session_item= ma_multi_malloc(0,
+                                      &session_item, sizeof(LIST),
+                                      &str, sizeof(MYSQL_LEX_STRING),
+                                      &data, plen,
+                                      NULL)))
+                  {
+                    ma_clear_session_state(mysql);
+                    SET_CLIENT_ERROR(mysql, CR_OUT_OF_MEMORY, SQLSTATE_UNKNOWN, 0);
+                    return -1;
+                  }
+                  str->length= plen;
+                  str->str= data;
+                  memcpy(str->str, (char *)pos, plen);
+                  pos+= plen;
+                  session_item->data= str;
+                  mysql->extension->session_state[si_type].list= list_add(mysql->extension->session_state[si_type].list, session_item);
+                  if (set_charset &&
+                      strncmp(mysql->charset->csname, str->str, str->length) != 0)
+                  {
+                    char cs_name[64];
+                    CHARSET_INFO *cs_info;
+                    memcpy(cs_name, str->str, str->length);
+                    cs_name[str->length]= 0;
+                    if ((cs_info = (CHARSET_INFO *)mysql_find_charset_name(cs_name)))
+                      mysql->charset= cs_info;
+                  }
+                }
+                break;
+              default:
+                /* not supported yet */
+                plen= net_field_length(&pos);
+                pos+= plen;
+                break;
+              }
+              item_len-= (pos - old_pos);
+            }
+          }
+          for (i= SESSION_TRACK_BEGIN; i <= SESSION_TRACK_END; i++)
+          {
+            mysql->extension->session_state[i].list= list_reverse(mysql->extension->session_state[i].list);
+            mysql->extension->session_state[i].current= mysql->extension->session_state[i].list;
+          }
+        }
+      }
+    }
+    else if (mysql->server_capabilities & CLIENT_SESSION_TRACKING)
+      ma_clear_session_state(mysql);
     DBUG_RETURN(0);
   }
   if (field_count == NULL_LENGTH)		/* LOAD DATA LOCAL INFILE */
@@ -2482,6 +2629,28 @@ get_info:
   mysql->status=MYSQL_STATUS_GET_RESULT;
   mysql->field_count=field_count;
   DBUG_RETURN(0);
+}
+
+int STDCALL mysql_session_track_get_next(MYSQL *mysql, enum enum_session_state_type type,
+                                         const char **data, size_t *length)
+{
+  MYSQL_LEX_STRING *str;
+  if (!mysql->extension->session_state[type].current)
+    return 1;
+
+  str= (MYSQL_LEX_STRING *)mysql->extension->session_state[type].current->data;
+  mysql->extension->session_state[type].current= mysql->extension->session_state[type].current->next;
+
+  *data= str->str ? str->str : NULL;
+  *length= str->str ? str->length : 0;
+  return 0;
+}
+
+int STDCALL mysql_session_track_get_first(MYSQL *mysql, enum enum_session_state_type type,
+                                          const char **data, size_t *length)
+{
+  mysql->extension->session_state[type].current= mysql->extension->session_state[type].list;
+  return mysql_session_track_get_next(mysql, type, data, length);
 }
 
 my_bool STDCALL

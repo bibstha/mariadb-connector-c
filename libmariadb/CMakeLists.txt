@@ -147,6 +147,8 @@ SET(EXPORT_SYMBOLS
  mysql_send_query_start
  mysql_server_end
  mysql_server_init
+ mysql_session_track_get_next
+ mysql_session_track_get_first
  mysql_set_character_set
  mysql_set_character_set_cont
  mysql_set_character_set_start
