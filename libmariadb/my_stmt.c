@@ -327,25 +327,52 @@ void mthd_stmt_flush_unbuffered(MYSQL_STMT *stmt)
   uchar *pos;
 
   int in_resultset= stmt->state > MYSQL_STMT_EXECUTED &&
-    stmt->state < MYSQL_STMT_FETCH_DONE;
-
-  while ((packet_len = net_safe_read(stmt->mysql, &is_data_packet)) != packet_error)
+                    stmt->state < MYSQL_STMT_FETCH_DONE;
+  while ((packet_len = net_safe_read(mysql, &is_data_packet)) != packet_error)
   {
     pos= mysql->net.read_pos;
     if (stmt->mysql->server_capabilities & CLIENT_DEPRECATE_EOF)
     {
-      if ((!in_resultset && *pos == 0) || // OK Packet
-          (*pos != 0 && !is_data_packet)) // EOF Packet
+      if (!in_resultset && *pos == 0) /* actual OK packet with 0 */
       {
         ma_read_ok_packet(mysql, pos + 1, packet_len);
         goto end;
       }
+
+      // so we do not check for OK pkt with 0 next time in the loop
+      // packet with first byte = 0 can only happen as the first packet
       in_resultset = 1;
+
+      if (*pos != 0 && !is_data_packet)
+      {
+        ma_read_ok_packet(mysql, pos + 1, packet_len);
+        goto end;
+      }
     }
     else
     {
-      if (packet_len < 8 && stmt->mysql->net.read_pos[0] == 254)
-        return;
+      if (!in_resultset && *pos == 0) /* OK */
+      {
+        pos++;
+        net_field_length(&pos);
+        net_field_length(&pos);
+        mysql->server_status= uint2korr(pos);
+        goto end;
+      }
+      if (packet_len < 8 && *pos == 254) /* EOF */
+      {
+        if (mariadb_connection(mysql))
+        {
+          mysql->server_status= uint2korr(pos + 3);
+          if (in_resultset)
+            goto end;
+          in_resultset= 1;
+        }
+        else
+        {
+          goto end;
+        }
+      }
     }
   }
 end:
@@ -1014,7 +1041,9 @@ my_bool net_stmt_close(MYSQL_STMT *stmt, my_bool remove)
     /* check if all data are fetched */
     if (stmt->mysql->status != MYSQL_STATUS_READY)
     {
-      stmt->mysql->methods->db_stmt_flush_unbuffered(stmt);
+      do {
+        stmt->mysql->methods->db_stmt_flush_unbuffered(stmt);
+      } while(mysql_stmt_more_results(stmt));
       stmt->mysql->status= MYSQL_STATUS_READY;
     }
     if (stmt->state > MYSQL_STMT_INITTED)
@@ -1518,7 +1547,10 @@ int STDCALL mysql_stmt_execute(MYSQL_STMT *stmt)
   }
   if (stmt->state > MYSQL_STMT_WAITING_USE_OR_STORE && stmt->state < MYSQL_STMT_FETCH_DONE && !stmt->result.data)
   {
-    mysql->methods->db_stmt_flush_unbuffered(stmt);
+    if (!stmt->cursor_exists)
+      do {
+        mysql->methods->db_stmt_flush_unbuffered(stmt);
+      } while(mysql_stmt_more_results(stmt));
     stmt->state= MYSQL_STMT_PREPARED;
     stmt->mysql->status= MYSQL_STATUS_READY;
   }
