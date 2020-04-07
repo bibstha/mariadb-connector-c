@@ -1670,8 +1670,11 @@ static int test_conc392(MYSQL *mysql)
     diag("Server doesn't support session tracking (cap=%lu)", mysql->server_capabilities);
     return SKIP;
   }
-  
+
   rc= mysql_query(mysql, "set session_track_state_change=1");
+  check_mysql_rc(rc, mysql);
+
+  rc= mysql_query(mysql, "USE mysql");
   check_mysql_rc(rc, mysql);
 
   if (mysql_session_track_get_first(mysql, SESSION_TRACK_STATE_CHANGE, &data, &len))
