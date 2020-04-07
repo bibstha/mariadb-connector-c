@@ -127,6 +127,7 @@ struct st_mysql_methods MARIADB_DEFAULT_METHODS;
 
 #define native_password_plugin_name "mysql_native_password"
 
+int ma_read_ok_packet(MYSQL *mysql, uchar *pos, ulong length);
 static void end_server(MYSQL *mysql);
 static void mysql_close_memory(MYSQL *mysql);
 void read_user_name(char *name);
@@ -398,7 +399,7 @@ void net_get_error(char *buf, size_t buf_len,
 *****************************************************************************/
 
 ulong
-net_safe_read(MYSQL *mysql)
+net_safe_read(MYSQL *mysql, my_bool *is_data_packet)
 {
   NET *net= &mysql->net;
   ulong len=0;
@@ -407,6 +408,10 @@ net_safe_read(MYSQL *mysql)
 restart:
   /* Don't give sigpipe errors if the client doesn't want them */
   set_sigpipe(mysql);
+
+  if (is_data_packet)
+    *is_data_packet= FALSE;
+
   if (net->vio != 0)
     len=my_net_read(net);
   reset_sigpipe(mysql);
@@ -463,6 +468,38 @@ restart:
     DBUG_PRINT("error",("Got error: %d (%s)", net->last_errno,
 			net->last_error));
     return(packet_error);
+  }
+  else
+  {
+    /*
+      Now we have a data packet, unless it is OK packet starting with
+      0xFE - we detect that case below.
+    */
+    if (is_data_packet)
+      *is_data_packet= TRUE;
+    /*
+       For a packet starting with 0xFE detect if it is OK packet or a
+       huge data packet. Note that old servers do not send OK packets
+       starting with 0xFE.
+    */
+    if ((mysql->server_capabilities & CLIENT_DEPRECATE_EOF) &&
+        (net->read_pos[0] == 254))
+    {
+      /* detect huge data packet */
+      if (len > MAX_PACKET_LENGTH)
+        return len;
+      /* otherwise we have OK packet starting with 0xFE */
+      if (is_data_packet)
+        *is_data_packet= FALSE;
+      return len;
+    }
+    /* for old client detect EOF packet */
+    if (!(mysql->server_capabilities & CLIENT_DEPRECATE_EOF) &&
+        (net->read_pos[0] == 254) && (len < 8))
+    {
+      if (is_data_packet)
+        *is_data_packet= FALSE;
+    }
   }
   return len;
 }
@@ -632,7 +669,7 @@ mthd_my_send_cmd(MYSQL *mysql,enum enum_server_command command, const char *arg,
   }
   result=0;
   if (!skipp_check) {
-    result= ((mysql->packet_length=net_safe_read(mysql)) == packet_error ?
+    result= ((mysql->packet_length=net_safe_read(mysql, NULL)) == packet_error ?
 	     1 : 0);
     DBUG_PRINT("info", ("packet_length=%llu", mysql->packet_length));
   }
@@ -819,13 +856,14 @@ end_server(MYSQL *mysql)
 void mthd_my_skip_result(MYSQL *mysql)
 {
   ulong pkt_len;
+  my_bool is_data_packet;
   DBUG_ENTER("madb_skip_result");
 
   do {
-    pkt_len= net_safe_read(mysql);
+    pkt_len= net_safe_read(mysql, &is_data_packet);
     if (pkt_len == packet_error)
       break;
-  } while (pkt_len > 8 || mysql->net.read_pos[0] != 254);
+  } while (mysql->net.read_pos[0] == 0 || is_data_packet);
   DBUG_VOID_RETURN;
 }
 
@@ -1149,64 +1187,75 @@ static size_t rset_field_offsets[]= {
   OFFSET(MYSQL_FIELD, org_name_length)
 };
 
+int
+unpack_field(MEM_ROOT *alloc, my_bool default_value,
+             MYSQL_ROWS *row, MYSQL_FIELD *field)
+{
+  unsigned int i, field_count= sizeof(rset_field_offsets)/sizeof(size_t)/2;
+  char    *p;
+
+  for (i=0; i < field_count; i++)
+  {
+    switch(row->data[i][0]) {
+      case 0:
+        *(char **)(((char *)field) + rset_field_offsets[i*2])= strdup_root(alloc, "");
+        *(unsigned int *)(((char *)field) + rset_field_offsets[i*2+1])= 0;
+        break;
+      default:
+        *(char **)(((char *)field) + rset_field_offsets[i*2])= 
+          strdup_root(alloc, (char *)row->data[i]);
+        *(unsigned int *)(((char *)field) + rset_field_offsets[i*2+1])=
+          (uint)(row->data[i+1] - row->data[i] - 1);
+        break;
+    }
+  }
+
+  p= (char *)row->data[6];
+  /* filler */
+  field->charsetnr= uint2korr(p);
+  p+= 2;
+  field->length= (uint) uint4korr(p);
+  p+= 4;
+  field->type=   (enum enum_field_types)uint1korr(p);
+  p++;
+  field->flags= uint2korr(p);
+  p+= 2;
+  field->decimals= (uint) p[0];
+  p++;
+
+  /* filler */
+  p+= 2;
+
+  if (INTERNAL_NUM_FIELD(field))
+    field->flags|= NUM_FLAG;
+
+  if (default_value && row->data[7])
+  {
+    field->def=strdup_root(alloc,(char*) row->data[7]);
+  }
+  else
+    field->def=0;
+  field->max_length= 0;
+
+  return 0;
+}
+
 MYSQL_FIELD *
 unpack_fields(MYSQL_DATA *data,MEM_ROOT *alloc,uint fields,
 	      my_bool default_value, my_bool long_flag_protocol)
 {
   MYSQL_ROWS	*row;
   MYSQL_FIELD	*field,*result;
-  char    *p;
-  unsigned int i, field_count= sizeof(rset_field_offsets)/sizeof(size_t)/2;
 
   DBUG_ENTER("unpack_fields");
   field=result=(MYSQL_FIELD*) alloc_root(alloc,sizeof(MYSQL_FIELD)*fields);
   if (!result)
     DBUG_RETURN(0);
+  memset(field, 0, sizeof(MYSQL_FIELD)*fields);
 
   for (row=data->data; row ; row = row->next,field++)
   {
-    for (i=0; i < field_count; i++)
-    {
-      switch(row->data[i][0]) {
-      case 0:
-       *(char **)(((char *)field) + rset_field_offsets[i*2])= strdup_root(alloc, "");
-       *(unsigned int *)(((char *)field) + rset_field_offsets[i*2+1])= 0;
-       break;
-     default:
-       *(char **)(((char *)field) + rset_field_offsets[i*2])= 
-         strdup_root(alloc, (char *)row->data[i]);
-       *(unsigned int *)(((char *)field) + rset_field_offsets[i*2+1])=
-         (uint)(row->data[i+1] - row->data[i] - 1);
-       break;
-      }
-    }
-
-    p= (char *)row->data[6];
-    /* filler */
-    field->charsetnr= uint2korr(p);
-    p+= 2;
-    field->length= (uint) uint4korr(p);
-    p+= 4;
-    field->type=   (enum enum_field_types)uint1korr(p);
-    p++;
-    field->flags= uint2korr(p);
-    p+= 2;
-    field->decimals= (uint) p[0];
-    p++;
-
-    /* filler */
-    p+= 2;
-
-    if (INTERNAL_NUM_FIELD(field))
-      field->flags|= NUM_FLAG;
-
-    if (default_value && row->data[7])
-    {
-      field->def=strdup_root(alloc,(char*) row->data[7]);
-    }
-    else
-      field->def=0;
-    field->max_length= 0;
+    unpack_field(alloc, default_value, row, field);
   }
   free_rows(data);				/* Free old data */
   DBUG_RETURN(result);
@@ -1226,9 +1275,10 @@ MYSQL_DATA *mthd_my_read_rows(MYSQL *mysql,MYSQL_FIELD *mysql_fields,
   MYSQL_DATA *result;
   MYSQL_ROWS **prev_ptr,*cur;
   NET *net = &mysql->net;
+  my_bool is_data_packet;
   DBUG_ENTER("madb_read_rows");
 
-  if ((pkt_len= net_safe_read(mysql)) == packet_error)
+  if ((pkt_len= net_safe_read(mysql, &is_data_packet)) == packet_error)
     DBUG_RETURN(0);
   if (!(result=(MYSQL_DATA*) my_malloc(sizeof(MYSQL_DATA),
 				       MYF(MY_WME | MY_ZEROFILL))))
@@ -1242,7 +1292,7 @@ MYSQL_DATA *mthd_my_read_rows(MYSQL *mysql,MYSQL_FIELD *mysql_fields,
   result->rows=0;
   result->fields=fields;
 
-  while (*(cp=net->read_pos) != 254 || pkt_len >= 8)
+  while (*(cp=net->read_pos) == 0 || is_data_packet)
   {
     result->rows++;
     if (!(cur= (MYSQL_ROWS*) alloc_root(&result->alloc,
@@ -1285,7 +1335,7 @@ MYSQL_DATA *mthd_my_read_rows(MYSQL *mysql,MYSQL_FIELD *mysql_fields,
       }
     }
     cur->data[field]=to;			/* End of last field */
-    if ((pkt_len=net_safe_read(mysql)) == packet_error)
+    if ((pkt_len=net_safe_read(mysql, &is_data_packet)) == packet_error)
     {
       free_rows(result);
       DBUG_RETURN(0);
@@ -1295,10 +1345,17 @@ MYSQL_DATA *mthd_my_read_rows(MYSQL *mysql,MYSQL_FIELD *mysql_fields,
   /* save status */
   if (pkt_len > 1)
   {
-    cp++;
-    mysql->warning_count= uint2korr(cp);
-    cp+= 2;
-    mysql->server_status= uint2korr(cp);
+    if (mysql->server_capabilities & CLIENT_DEPRECATE_EOF)
+    {
+      ma_read_ok_packet(mysql, cp + 1, pkt_len);
+    }
+    else
+    {
+      cp++;
+      mysql->warning_count= uint2korr(cp);
+      cp+= 2;
+      mysql->server_status= uint2korr(cp);
+    }
   }
   DBUG_PRINT("exit",("Got %d rows",result->rows));
   DBUG_RETURN(result);
@@ -1316,14 +1373,20 @@ int mthd_my_read_one_row(MYSQL *mysql,uint fields,MYSQL_ROW row, ulong *lengths)
   uint field;
   ulong pkt_len,len;
   uchar *pos,*prev_pos, *end_pos;
+  my_bool is_data_packet;
 
-  if ((pkt_len=(uint) net_safe_read(mysql)) == packet_error)
+  if ((pkt_len=(uint) net_safe_read(mysql, &is_data_packet)) == packet_error)
     return -1;
   
-  if (pkt_len <= 8 && mysql->net.read_pos[0] == 254)
+  if (mysql->net.read_pos[0] != 0 && !is_data_packet)
   {
-    mysql->warning_count= uint2korr(mysql->net.read_pos + 1);
-    mysql->server_status= uint2korr(mysql->net.read_pos + 3);
+    if (mysql->server_capabilities & CLIENT_DEPRECATE_EOF)
+      ma_read_ok_packet(mysql, mysql->net.read_pos + 1, pkt_len);
+    else
+    {
+      mysql->warning_count= uint2korr(mysql->net.read_pos + 1);
+      mysql->server_status= uint2korr(mysql->net.read_pos + 3);
+    }
     return 1;				/* End of data */
   }
   prev_pos= 0;				/* allowed to write at packet[-1] */
@@ -1355,6 +1418,73 @@ int mthd_my_read_one_row(MYSQL *mysql,uint fields,MYSQL_ROW row, ulong *lengths)
   row[field]=(char*) prev_pos+1;		/* End of last field */
   *prev_pos=0;					/* Terminate last field */
   return 0;
+}
+
+/**
+ * If CLIENT_DEPRECATE_EOF isn't supported by the server, the response looked like
+ * <FieldCount><Metadata><EOF><ResultSet * n><EOF>.
+ *
+ * Otherwise, the response looks like <FieldCount><Metadata><ResultSet * n><EOF>.
+ * The number of metadata to look for is already available in FieldCount
+ * therefore first EOF is not necessary.
+ *
+ * Therefore this method is introduced to just read packet metadata 
+ * and is called by both mthd_my_read_query_result and mthd_stmt_read_prepare_response
+ */
+MYSQL_FIELD *mthd_my_read_metadata_ex(MYSQL *mysql, MEM_ROOT *alloc,
+                                     ulong field_count, uint field)
+{
+  ulong *len;
+  uint  f;
+  uchar *pos;
+  MYSQL_FIELD *fields, *result;
+  MYSQL_ROWS data;
+  NET *net = &mysql->net;
+
+  len= (ulong*) alloc_root(alloc, sizeof(ulong)*field);
+  fields= result= (MYSQL_FIELD *) alloc_root(alloc,
+      sizeof(MYSQL_FIELD)*field_count);
+
+  if (!result)
+  {
+    SET_CLIENT_ERROR(mysql, CR_OUT_OF_MEMORY, SQLSTATE_UNKNOWN, 0);
+    return(0);
+  }
+
+  data.data= (MYSQL_ROW) alloc_root(alloc, sizeof(char *)*(field+1));
+  memset(data.data, 0, sizeof(char *)*(field+1));
+
+  /*
+     In this below loop we read each column info as 1 single row
+     and save it in mysql->fields array
+     */
+  for (f=0 ; f < field_count ; ++f)
+  {
+    if(mthd_my_read_one_row(mysql, field, data.data, len) == -1)
+      return NULL;
+    if(unpack_field(alloc, 0, &data, fields++))
+      return NULL;
+  }
+  if (!(mysql->server_capabilities & CLIENT_DEPRECATE_EOF))
+  {
+    if (packet_error == net_safe_read(mysql, NULL))
+      return 0;
+
+    pos= net->read_pos;
+    if (*pos == 254)
+    {
+      mysql->warning_count= uint2korr(pos + 1);
+      mysql->server_status= uint2korr(pos + 3);
+    }
+  }
+
+  return result;
+}
+
+MYSQL_FIELD *mthd_my_read_metadata(MYSQL *mysql, ulong field_count, uint field)
+{
+  return mthd_my_read_metadata_ex(mysql, &mysql->field_alloc,
+                                  field_count, field);
 }
 
 /****************************************************************************
@@ -1892,7 +2022,7 @@ MYSQL *mthd_my_real_connect(MYSQL *mysql, const char *host, const char *user,
                  errno);
     goto error;
   }
-  if ((pkt_length=net_safe_read(mysql)) == packet_error)
+  if ((pkt_length=net_safe_read(mysql, NULL)) == packet_error)
   {
     if (mysql->net.last_errno == CR_SERVER_LOST)
       my_set_error(mysql, CR_SERVER_LOST, SQLSTATE_UNKNOWN,
@@ -2452,61 +2582,48 @@ mysql_send_query(MYSQL* mysql, const char* query, unsigned long length)
   return simple_command(mysql, MYSQL_COM_QUERY, query, length, 1,0);
 }
 
-int mthd_my_read_query_result(MYSQL *mysql)
+int ma_read_ok_packet(MYSQL *mysql, uchar *pos, ulong length)
 {
-  uchar *pos;
-  ulong field_count;
-  MYSQL_DATA *fields;
-  ulong length;
-  DBUG_ENTER("mthd_my_read_query_result");
-
-  if (!mysql || (length = net_safe_read(mysql)) == packet_error)
-    DBUG_RETURN(1);
-  free_old_query(mysql);			/* Free old result */
-get_info:
-  pos=(uchar*) mysql->net.read_pos;
-  if ((field_count= net_field_length(&pos)) == 0)
+  size_t item_len;
+  mysql->affected_rows= net_field_length_ll(&pos);
+  mysql->insert_id= net_field_length_ll(&pos);
+  mysql->server_status=uint2korr(pos); 
+  pos+=2;
+  mysql->warning_count=uint2korr(pos); 
+  pos+=2;
+  if (pos < mysql->net.read_pos+length)
   {
-    size_t item_len;
-    mysql->affected_rows= net_field_length_ll(&pos);
-    mysql->insert_id= net_field_length_ll(&pos);
-    mysql->server_status=uint2korr(pos); 
-    pos+=2;
-    mysql->warning_count=uint2korr(pos); 
-    pos+=2;
-    if (pos < mysql->net.read_pos+length)
+    if ((item_len= net_field_length(&pos)))
+      mysql->info=(char*) pos;
+
+    /* check if server supports session tracking */
+    if (mysql->server_capabilities & CLIENT_SESSION_TRACKING)
     {
-      if ((item_len= net_field_length(&pos)))
-        mysql->info=(char*) pos;
+      ma_clear_session_state(mysql);
+      pos+= item_len;
 
-      /* check if server supports session tracking */
-      if (mysql->server_capabilities & CLIENT_SESSION_TRACKING)
+      if (mysql->server_status & SERVER_SESSION_STATE_CHANGED)
       {
-        ma_clear_session_state(mysql);
-        pos+= item_len;
-
-        if (mysql->server_status & SERVER_SESSION_STATE_CHANGED)
+        int i;
+        if (pos < mysql->net.read_pos + length)
         {
-          int i;
-          if (pos < mysql->net.read_pos + length)
+          LIST *session_item;
+          MYSQL_LEX_STRING *str= NULL;
+          enum enum_session_state_type si_type;
+          uchar *old_pos= pos;
+          size_t item_len= net_field_length(&pos);  /* length for all items */
+
+          /* length was already set, so make sure that info will be zero terminated */
+          if (mysql->info)
+            *old_pos= 0;
+
+          while (item_len > 0)
           {
-            LIST *session_item;
-            MYSQL_LEX_STRING *str= NULL;
-            enum enum_session_state_type si_type;
-            uchar *old_pos= pos;
-            size_t item_len= net_field_length(&pos);  /* length for all items */
-
-            /* length was already set, so make sure that info will be zero terminated */
-            if (mysql->info)
-              *old_pos= 0;
-
-            while (item_len > 0)
-            {
-              size_t plen;
-              char *data;
-              old_pos= pos;
-              si_type= (enum enum_session_state_type)net_field_length(&pos);
-              switch(si_type) {
+            size_t plen;
+            char *data;
+            old_pos= pos;
+            si_type= (enum enum_session_state_type)net_field_length(&pos);
+            switch(si_type) {
               case SESSION_TRACK_GTIDS:
                 net_field_length(&pos); /* skip encoding */
               case SESSION_TRACK_SCHEMA:
@@ -2517,10 +2634,10 @@ get_info:
                   net_field_length(&pos); /* ignore total length, item length will follow next */
                 plen= net_field_length(&pos);
                 if (!(session_item= ma_multi_malloc(0,
-                                    &session_item, sizeof(LIST),
-                                    &str, sizeof(MYSQL_LEX_STRING),
-                                    &data, plen,
-                                    NULL)))
+                        &session_item, sizeof(LIST),
+                        &str, sizeof(MYSQL_LEX_STRING),
+                        &data, plen,
+                        NULL)))
                 {
                   ma_clear_session_state(mysql);
                   SET_CLIENT_ERROR(mysql, CR_OUT_OF_MEMORY, SQLSTATE_UNKNOWN, 0);
@@ -2549,10 +2666,10 @@ get_info:
                     set_charset= 1;
                   plen= net_field_length(&pos);
                   if (!(session_item= ma_multi_malloc(0,
-                                      &session_item, sizeof(LIST),
-                                      &str, sizeof(MYSQL_LEX_STRING),
-                                      &data, plen,
-                                      NULL)))
+                          &session_item, sizeof(LIST),
+                          &str, sizeof(MYSQL_LEX_STRING),
+                          &data, plen,
+                          NULL)))
                   {
                     ma_clear_session_state(mysql);
                     SET_CLIENT_ERROR(mysql, CR_OUT_OF_MEMORY, SQLSTATE_UNKNOWN, 0);
@@ -2581,22 +2698,37 @@ get_info:
                 plen= net_field_length(&pos);
                 pos+= plen;
                 break;
-              }
-              item_len-= (pos - old_pos);
             }
+            item_len-= (pos - old_pos);
           }
-          for (i= SESSION_TRACK_BEGIN; i <= SESSION_TRACK_END; i++)
-          {
-            mysql->extension->session_state[i].list= list_reverse(mysql->extension->session_state[i].list);
-            mysql->extension->session_state[i].current= mysql->extension->session_state[i].list;
-          }
+        }
+        for (i= SESSION_TRACK_BEGIN; i <= SESSION_TRACK_END; i++)
+        {
+          mysql->extension->session_state[i].list= list_reverse(mysql->extension->session_state[i].list);
+          mysql->extension->session_state[i].current= mysql->extension->session_state[i].list;
         }
       }
     }
-    else if (mysql->server_capabilities & CLIENT_SESSION_TRACKING)
-      ma_clear_session_state(mysql);
-    DBUG_RETURN(0);
   }
+  else if (mysql->server_capabilities & CLIENT_SESSION_TRACKING)
+    ma_clear_session_state(mysql);
+  return 0;
+}
+
+int mthd_my_read_query_result(MYSQL *mysql)
+{
+  uchar *pos;
+  ulong field_count;
+  ulong length;
+  DBUG_ENTER("mthd_my_read_query_result");
+
+  if (!mysql || (length = net_safe_read(mysql, NULL)) == packet_error)
+    DBUG_RETURN(1);
+  free_old_query(mysql);			/* Free old result */
+get_info:
+  pos=(uchar*) mysql->net.read_pos;
+  if ((field_count= net_field_length(&pos)) == 0)
+    DBUG_RETURN(ma_read_ok_packet(mysql, pos, length));
   if (field_count == NULL_LENGTH)		/* LOAD DATA LOCAL INFILE */
   {
     int error= 0;
@@ -2611,7 +2743,7 @@ get_info:
     }
     error=mysql_handle_local_infile(mysql, (char *)pos);
 
-    if ((length=net_safe_read(mysql)) == packet_error || error)
+    if ((length=net_safe_read(mysql, NULL)) == packet_error || error)
       DBUG_RETURN(-1);
     goto get_info;				/* Get info packet */
   }
@@ -2619,13 +2751,11 @@ get_info:
     mysql->server_status|= SERVER_STATUS_IN_TRANS;
 
   mysql->extra_info= net_field_length_ll(&pos); /* Maybe number of rec */
-  if (!(fields=mysql->methods->db_read_rows(mysql,(MYSQL_FIELD*) 0,8)))
+  if (!(mysql->fields=mthd_my_read_metadata(mysql, field_count, 7)))
+  {
+    free_root(&mysql->field_alloc, MYF(0));
     DBUG_RETURN(-1);
-  if (!(mysql->fields=unpack_fields(fields,&mysql->field_alloc,
-				    (uint) field_count,1,
-				    (my_bool) test(mysql->server_capabilities &
-						   CLIENT_LONG_FLAG))))
-    DBUG_RETURN(-1);
+  }
   mysql->status=MYSQL_STATUS_GET_RESULT;
   mysql->field_count=field_count;
   DBUG_RETURN(0);
@@ -2964,12 +3094,17 @@ mysql_list_fields(MYSQL *mysql, const char *table, const char *wild)
   DBUG_RETURN(result);
 }
 
+/********************************************************
+ Warning: mysql_list_processes is deprecated and will be
+          removed. Use SQL statement "SHOW PROCESSLIST"
+          instead
+ ********************************************************/
+
 /* List all running processes (threads) in server */
 
 MYSQL_RES * STDCALL
 mysql_list_processes(MYSQL *mysql)
 {
-  MYSQL_DATA *fields;
   uint field_count;
   uchar *pos;
   DBUG_ENTER("mysql_list_processes");
@@ -2980,12 +3115,10 @@ mysql_list_processes(MYSQL *mysql)
   free_old_query(mysql);
   pos=(uchar*) mysql->net.read_pos;
   field_count=(uint) net_field_length(&pos);
-  if (!(fields = mysql->methods->db_read_rows(mysql,(MYSQL_FIELD*) 0,5)))
+
+  if (!(mysql->fields=mthd_my_read_metadata(mysql, field_count, 7)))
     DBUG_RETURN(NULL);
-  if (!(mysql->fields=unpack_fields(fields,&mysql->field_alloc,field_count,0,
-				    (my_bool) test(mysql->server_capabilities &
-						   CLIENT_LONG_FLAG))))
-    DBUG_RETURN(0);
+
   mysql->status=MYSQL_STATUS_GET_RESULT;
   mysql->field_count=field_count;
   DBUG_RETURN(mysql_store_result(mysql));

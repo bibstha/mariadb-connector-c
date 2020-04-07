@@ -105,6 +105,10 @@ static int test_multi_result(MYSQL *mysql)
  
   FAIL_IF(int_data[0] != 10 || int_data[1] != 20 || int_data[2] != 30,
           "expected 10 20 30"); 
+
+  rc= mysql_stmt_free_result(stmt); // must call before next mysql_stmt_next_result
+  check_stmt_rc(rc, stmt);
+
   rc= mysql_stmt_next_result(stmt);
   check_stmt_rc(rc, stmt);
   rc= mysql_stmt_bind_result(stmt, rs_bind);

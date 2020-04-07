@@ -466,7 +466,7 @@ static int client_mpvio_read_packet(struct st_plugin_vio *mpv, uchar **buf)
   }
 
   /* otherwise read the data */
-  pkt_len= net_safe_read(mysql);
+  pkt_len= net_safe_read(mysql, NULL);
   mpvio->last_read_packet_len= pkt_len;
   *buf= mysql->net.read_pos;
 
@@ -662,7 +662,7 @@ int run_plugin_auth(MYSQL *mysql, char *data, uint data_len,
 
   /* read the OK packet (or use the cached value in mysql->net.read_pos */
   if (res == CR_OK)
-    pkt_length= net_safe_read(mysql);
+    pkt_length= net_safe_read(mysql, NULL);
   else /* res == CR_OK_HANDSHAKE_COMPLETE */
     pkt_length= mpvio.last_read_packet_len;
 
@@ -716,7 +716,7 @@ int run_plugin_auth(MYSQL *mysql, char *data, uint data_len,
     if (res != CR_OK_HANDSHAKE_COMPLETE)
     {
       /* Read what server thinks about out new auth message report */
-      if (net_safe_read(mysql) == packet_error)
+      if (net_safe_read(mysql, NULL) == packet_error)
       {
         if (mysql->net.last_errno == CR_SERVER_LOST)
           my_set_error(mysql, CR_SERVER_LOST, SQLSTATE_UNKNOWN,
