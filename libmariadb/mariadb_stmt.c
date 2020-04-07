@@ -387,7 +387,9 @@ void mthd_stmt_flush_unbuffered(MYSQL_STMT *stmt)
         goto end;
       }
 
-      in_resultset = 1; // so we do not check for OK pkt with 0 next time in the loop
+      // so we do not check for OK pkt with 0 next time in the loop
+      // packet with first byte = 0 can only happen as the first packet
+      in_resultset = 1;
 
       if (*pos != 0 && !is_data_packet)
       {
